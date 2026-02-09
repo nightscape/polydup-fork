@@ -1,0 +1,11 @@
+---
+source: crates/polydup-cli/tests/snapshot_tests.rs
+expression: stderr
+---
+Error: Invalid --only-type value: 'invalid'
+
+Suggestion: Use one of: type-1, type-2, or type-3
+           Example: polydup scan ./src --only-type type-1
+           Multiple types: --only-type type-1,type-2
+
+Documentation: https://github.com/wiesnerbernard/polydup#clone-types

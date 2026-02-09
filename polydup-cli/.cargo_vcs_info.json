@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "a28dc4dbb1db057d64296089286c0b228e565f57"
+  },
+  "path_in_vcs": "crates/polydup-cli"
+}

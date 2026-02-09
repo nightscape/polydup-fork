@@ -1,0 +1,433 @@
+//! Interactive initialization wizard for PolyDup
+//!
+//! This module provides the `polydup init` command which interactively guides users through
+//! setting up PolyDup configuration, CI/CD workflows, and pre-commit hooks.
+
+use anyhow::{Context, Result};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
+use std::fs;
+use std::path::Path;
+
+use crate::config::{CiConfig, Config, ExcludeConfig, OutputConfig, ScanConfig};
+use crate::detect::{
+    combined_exclude_patterns, detect_environments, recommended_install_command, Environment,
+};
+
+/// Arguments for the init command
+#[derive(Debug, Clone)]
+pub struct InitArgs {
+    /// Force overwrite existing configuration
+    pub force: bool,
+    /// Skip interactive prompts and use defaults
+    pub non_interactive: bool,
+}
+
+/// Run the initialization wizard
+pub fn cmd_init(args: InitArgs) -> Result<()> {
+    println!("PolyDup Initialization Wizard");
+    println!("=============================\n");
+
+    // Check if config already exists
+    if Config::exists() && !args.force {
+        let config_path = Config::config_path().unwrap();
+        eprintln!(
+            "Configuration file already exists: {}",
+            config_path.display()
+        );
+        eprintln!("Use --force to overwrite, or edit it manually.");
+        std::process::exit(1);
+    }
+
+    // Detect environments
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+
+    let detected_envs =
+        detect_environments(&current_dir).context("Failed to detect project environments")?;
+
+    if detected_envs.is_empty() {
+        println!("No known project markers detected.");
+        println!("Generating generic configuration...\n");
+    } else {
+        println!("Detected environments:");
+        for env in &detected_envs {
+            println!("  - {}", env.name());
+        }
+        println!();
+    }
+
+    // Interactive or non-interactive flow
+    let config = if args.non_interactive {
+        create_default_config(&detected_envs)
+    } else {
+        create_interactive_config(&detected_envs)?
+    };
+
+    // Save configuration
+    let config_path = config
+        .save_default()
+        .context("Failed to save configuration")?;
+
+    println!("\nConfiguration saved to: {}", config_path.display());
+
+    // Optionally create GitHub Actions workflow
+    if !args.non_interactive {
+        let create_workflow = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Would you like to create a GitHub Actions workflow?")
+            .default(true)
+            .interact()?;
+
+        if create_workflow {
+            create_github_workflow(&detected_envs)?;
+        }
+    }
+
+    // Show next steps
+    print_next_steps(&detected_envs, &config_path);
+
+    Ok(())
+}
+
+/// Create configuration with default values
+fn create_default_config(environments: &[Environment]) -> Config {
+    let exclude_patterns = if environments.is_empty() {
+        ExcludeConfig::default().patterns
+    } else {
+        combined_exclude_patterns(environments)
+    };
+
+    Config {
+        scan: ScanConfig {
+            min_block_size: crate::defaults::MIN_BLOCK_SIZE,
+            similarity_threshold: crate::defaults::SIMILARITY,
+            exclude: ExcludeConfig {
+                patterns: exclude_patterns,
+            },
+        },
+        output: OutputConfig::default(),
+        ci: CiConfig::default(),
+    }
+}
+
+/// Create configuration through interactive prompts
+fn create_interactive_config(environments: &[Environment]) -> Result<Config> {
+    let theme = ColorfulTheme::default();
+
+    // Confirm detected environments
+    let selected_envs = if !environments.is_empty() {
+        let env_names: Vec<&str> = environments.iter().map(|e| e.name()).collect();
+        let defaults: Vec<bool> = vec![true; environments.len()];
+
+        println!("Confirm detected environments:");
+        let selections = MultiSelect::with_theme(&theme)
+            .items(&env_names)
+            .defaults(&defaults)
+            .interact()?;
+
+        selections
+            .into_iter()
+            .map(|i| environments[i])
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    // Select similarity threshold
+    let threshold_options = vec![
+        "Strict (0.95) - Only nearly identical code",
+        "Standard (0.85) - Balanced detection (recommended)",
+        "Relaxed (0.70) - Catch more similar code",
+        "Custom - Enter your own value",
+    ];
+
+    let threshold_selection = Select::with_theme(&theme)
+        .with_prompt("Select similarity threshold")
+        .items(&threshold_options)
+        .default(1)
+        .interact()?;
+
+    let similarity_threshold = match threshold_selection {
+        0 => 0.95,
+        1 => 0.85,
+        2 => 0.70,
+        3 => Input::<f64>::with_theme(&theme)
+            .with_prompt("Enter custom threshold (0.0-1.0)")
+            .default(0.85)
+            .validate_with(|input: &f64| {
+                if *input >= 0.0 && *input <= 1.0 {
+                    Ok(())
+                } else {
+                    Err("Threshold must be between 0.0 and 1.0")
+                }
+            })
+            .interact_text()?,
+        _ => 0.85,
+    };
+
+    // Select minimum block size
+    let block_size_options = vec![
+        "Small (10 lines) - Catch small duplicates",
+        "Medium (50 lines) - Balanced detection (recommended)",
+        "Large (100 lines) - Only significant duplicates",
+        "Custom - Enter your own value",
+    ];
+
+    let block_size_selection = Select::with_theme(&theme)
+        .with_prompt("Select minimum block size")
+        .items(&block_size_options)
+        .default(1)
+        .interact()?;
+
+    let min_block_size = match block_size_selection {
+        0 => 10,
+        1 => 50,
+        2 => 100,
+        3 => Input::<usize>::with_theme(&theme)
+            .with_prompt("Enter custom block size (lines)")
+            .default(50)
+            .validate_with(|input: &usize| {
+                if *input > 0 {
+                    Ok(())
+                } else {
+                    Err("Block size must be greater than 0")
+                }
+            })
+            .interact_text()?,
+        _ => 50,
+    };
+
+    // Generate exclude patterns
+    let exclude_patterns = if selected_envs.is_empty() {
+        ExcludeConfig::default().patterns
+    } else {
+        combined_exclude_patterns(&selected_envs)
+    };
+
+    // Ask about custom excludes
+    let add_custom_excludes = Confirm::with_theme(&theme)
+        .with_prompt("Add custom exclude patterns?")
+        .default(false)
+        .interact()?;
+
+    let mut final_patterns = exclude_patterns;
+
+    if add_custom_excludes {
+        println!("\nEnter exclude patterns (glob format), one per line.");
+        println!("Press Enter with empty input to finish.");
+
+        loop {
+            let pattern: String = Input::with_theme(&theme)
+                .with_prompt("Pattern")
+                .allow_empty(true)
+                .interact_text()?;
+
+            if pattern.is_empty() {
+                break;
+            }
+
+            final_patterns.push(pattern);
+        }
+    }
+
+    // Ask about output format
+    let format_options = vec!["text", "json"];
+    let format_selection = Select::with_theme(&theme)
+        .with_prompt("Default output format")
+        .items(&format_options)
+        .default(0)
+        .interact()?;
+
+    let output_format = format_options[format_selection].to_string();
+
+    // Ask about verbose output
+    let verbose = Confirm::with_theme(&theme)
+        .with_prompt("Enable verbose output by default?")
+        .default(false)
+        .interact()?;
+
+    Ok(Config {
+        scan: ScanConfig {
+            min_block_size,
+            similarity_threshold,
+            exclude: ExcludeConfig {
+                patterns: final_patterns,
+            },
+        },
+        output: OutputConfig {
+            format: output_format,
+            verbose,
+        },
+        ci: CiConfig::default(),
+    })
+}
+
+/// Create GitHub Actions workflow file
+fn create_github_workflow(environments: &[Environment]) -> Result<()> {
+    let workflow_dir = Path::new(".github/workflows");
+    fs::create_dir_all(workflow_dir).context("Failed to create .github/workflows directory")?;
+
+    let workflow_path = workflow_dir.join("polydup.yml");
+
+    if workflow_path.exists() {
+        let overwrite = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "{} already exists. Overwrite?",
+                workflow_path.display()
+            ))
+            .default(false)
+            .interact()?;
+
+        if !overwrite {
+            println!("Skipping GitHub Actions workflow creation.");
+            return Ok(());
+        }
+    }
+
+    let install_command = recommended_install_command(environments);
+    let workflow_content = generate_github_workflow(install_command);
+
+    fs::write(&workflow_path, workflow_content)
+        .context("Failed to write GitHub Actions workflow")?;
+
+    println!(
+        "GitHub Actions workflow created: {}",
+        workflow_path.display()
+    );
+
+    Ok(())
+}
+
+/// Generate GitHub Actions workflow content
+fn generate_github_workflow(install_command: &str) -> String {
+    format!(
+        r#"name: PolyDup Duplicate Detection
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  duplicate-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install PolyDup
+        run: {}
+
+      - name: Run duplicate detection
+        run: polydup scan . --format json > polydup-report.json
+        continue-on-error: true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: polydup-report
+          path: polydup-report.json
+
+      - name: Check for duplicates
+        run: |
+          if [ -s polydup-report.json ]; then
+            echo "Duplicates found. Review the report artifact."
+            # Uncomment the next line to fail the build on duplicates:
+            # exit 1
+          else
+            echo "No duplicates found."
+          fi
+"#,
+        install_command
+    )
+}
+
+/// Print next steps for the user
+fn print_next_steps(environments: &[Environment], config_path: &Path) {
+    println!("\n{}", "=".repeat(60));
+    println!("Next Steps");
+    println!("{}", "=".repeat(60));
+
+    println!("\n1. Install PolyDup locally (recommended):");
+
+    if environments.is_empty() {
+        println!("   cargo install polydup-cli");
+    } else {
+        let install_cmd = recommended_install_command(environments);
+        println!("   {}", install_cmd);
+
+        if environments.len() > 1 {
+            println!("\n   Alternative install methods:");
+            for env in environments {
+                for alt in env.alt_install_methods() {
+                    println!("   - {}", alt);
+                }
+            }
+        }
+    }
+
+    println!("\n2. Try scanning your project:");
+    println!("   polydup scan ./src");
+
+    println!("\n3. Configuration file location:");
+    println!("   {}", config_path.display());
+    println!("   Edit this file to customize settings.");
+
+    println!("\n4. CI/CD Integration:");
+    if Path::new(".github/workflows/polydup.yml").exists() {
+        println!("   GitHub Actions workflow created.");
+        println!("   Push your changes to trigger the workflow.");
+    } else {
+        println!("   Re-run 'polydup init' to create a GitHub Actions workflow.");
+    }
+
+    println!("\n5. Documentation:");
+    println!("   Visit https://github.com/wiesnerbernard/polydup for more info.");
+
+    println!("\n{}", "=".repeat(60));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_create_default_config() {
+        let envs = vec![Environment::NodeJs, Environment::Rust];
+        let config = create_default_config(&envs);
+
+        assert_eq!(config.scan.min_block_size, crate::defaults::MIN_BLOCK_SIZE);
+        assert_eq!(
+            config.scan.similarity_threshold,
+            crate::defaults::SIMILARITY
+        );
+        assert!(!config.scan.exclude.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_generate_github_workflow() {
+        let workflow = generate_github_workflow("cargo install polydup-cli");
+        assert!(workflow.contains("name: PolyDup Duplicate Detection"));
+        assert!(workflow.contains("cargo install polydup-cli"));
+        assert!(workflow.contains("polydup scan"));
+    }
+
+    #[test]
+    fn test_create_github_workflow() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        std::env::set_current_dir(temp_dir.path())?;
+
+        let envs = vec![Environment::Rust];
+        create_github_workflow(&envs)?;
+
+        let workflow_path = temp_dir.path().join(".github/workflows/polydup.yml");
+        assert!(workflow_path.exists());
+
+        let content = fs::read_to_string(workflow_path)?;
+        assert!(content.contains("PolyDup"));
+
+        Ok(())
+    }
+}

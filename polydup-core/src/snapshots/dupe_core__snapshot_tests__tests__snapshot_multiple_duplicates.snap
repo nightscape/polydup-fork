@@ -1,0 +1,26 @@
+---
+source: crates/polydup-core/src/snapshot_tests.rs
+expression: duplicates
+---
+[
+  {
+    "file1": "a.rs",
+    "file2": "b.rs",
+    "start_line1": 1,
+    "start_line2": 1,
+    "length": 10,
+    "similarity": 1.0,
+    "hash": "[hash]",
+    "clone_type": "type-1"
+  },
+  {
+    "file1": "a.rs",
+    "file2": "c.rs",
+    "start_line1": 5,
+    "start_line2": 10,
+    "length": 15,
+    "similarity": 0.92,
+    "hash": "[hash]",
+    "clone_type": "type-2"
+  }
+]

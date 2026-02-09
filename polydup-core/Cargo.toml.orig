@@ -1,0 +1,41 @@
+[package]
+name = "polydup-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cross-language duplicate code detection library using Tree-sitter and Rabin-Karp"
+homepage = "https://github.com/wiesnerbernard/polydup"
+repository = "https://github.com/wiesnerbernard/polydup"
+readme = "../../README.md"
+keywords = ["duplicate", "code", "detection", "tree-sitter", "ast"]
+categories = ["algorithms", "development-tools"]
+include = ["src/**/*", "queries/**/*.scm", "../../README.md", "../../LICENSE"]
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-rust = { workspace = true }
+rayon = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+ignore = { workspace = true }
+globset = "0.4"
+once_cell = "1.19"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+toml = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+insta = { workspace = true }
+tempfile = "3.8"
+
+[lib]
+name = "dupe_core"
+path = "src/lib.rs"
