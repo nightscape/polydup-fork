@@ -26,6 +26,7 @@ toml = { workspace = true }
 dialoguer = { workspace = true }
 serde = { workspace = true }
 colored = { workspace = true }
+tabled = { workspace = true }
 indicatif = { workspace = true }
 atty = { workspace = true }
 chrono = "0.4"

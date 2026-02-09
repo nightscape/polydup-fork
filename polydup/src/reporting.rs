@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use colored::*;
+use tabled::{builder::Builder, settings::Style};
 
 /// Truncate a duplicate ID to the specified length
 ///
@@ -33,93 +34,63 @@ pub fn format_text_report(
 ) -> Result<String> {
     let mut output = String::new();
 
-    // Box-drawing dashboard
-    let width = 63;
-    output.push_str(&format!(
-        "{}\n",
-        format!("╔{}╗", "═".repeat(width)).bright_black()
-    ));
-    output.push_str(&format!(
-        "{} {} {}\n",
-        "║".bright_black(),
-        format!("{:^width$}", "Scan Results", width = width)
-            .bright_cyan()
-            .bold(),
-        "║".bright_black()
-    ));
-    output.push_str(&format!(
-        "{}\n",
-        format!("╠{}╣", "═".repeat(width)).bright_black()
-    ));
-
-    // Basic statistics
-    output.push_str(&format!(
-        "{} {:<20} {:>width$} {}\n",
-        "║".bright_black(),
-        "Files scanned:".bright_white(),
-        report.files_scanned.to_string().bold(),
-        "║".bright_black(),
-        width = width - 22
-    ));
-    output.push_str(&format!(
-        "{} {:<20} {:>width$} {}\n",
-        "║".bright_black(),
-        "Functions analyzed:".bright_white(),
-        report.functions_analyzed.to_string().bold(),
-        "║".bright_black(),
-        width = width - 22
-    ));
-    output.push_str(&format!(
-        "{} {:<20} {:>width$} {}\n",
-        "║".bright_black(),
-        "Duplicates found:".bright_white(),
+    // Build dashboard table using tabled
+    let mut builder = Builder::default();
+    
+    // Header
+    builder.push_record([format!("{:^63}", "Scan Results").bright_cyan().bold().to_string()]);
+    
+    // Basic statistics - format as single entries with padding
+    builder.push_record([format!("Files scanned: {}", report.files_scanned.to_string().bold())]);
+    builder.push_record([format!("Functions analyzed: {}", report.functions_analyzed.to_string().bold())]);
+    builder.push_record([format!(
+        "Duplicates found: {}", 
         if report.duplicates.is_empty() {
             report.duplicates.len().to_string().green().bold()
         } else {
             report.duplicates.len().to_string().yellow().bold()
-        },
-        "║".bright_black(),
-        width = width - 22
-    ));
+        }
+    )]);
 
     // Show skipped files count (if any)
     if !report.skipped_files.is_empty() {
-        output.push_str(&format!(
-            "{} {:<20} {:>width$} {}\n",
-            "║".bright_black(),
-            "Files skipped:".bright_white(),
-            report.skipped_files.len().to_string().yellow(),
-            "║".bright_black(),
-            width = width - 22
-        ));
+        builder.push_record([format!("Files skipped: {}", report.skipped_files.len().to_string().yellow())]);
     }
 
     // Show ignored duplicates count (if any)
     let total_ignored =
         report.stats.suppressed_by_ignore_file + report.stats.suppressed_by_directive;
     if total_ignored > 0 {
-        output.push_str(&format!(
-            "{} {:<20} {:>width$} {}\n",
-            "║".bright_black(),
-            "Duplicates ignored:".bright_white(),
-            total_ignored.to_string().dimmed(),
-            "║".bright_black(),
-            width = width - 22
-        ));
+        builder.push_record([format!("Duplicates ignored: {}", total_ignored.to_string().dimmed())]);
     }
 
     // Lines saved estimation (only if duplicates found)
     if !report.duplicates.is_empty() {
         let lines_saved: usize = report.duplicates.iter().map(|d| d.length).sum();
-        output.push_str(&format!(
-            "{} {:<20} {:>width$} {}\n",
-            "║".bright_black(),
-            "Estimated savings:".bright_white(),
-            format!("~{} lines", lines_saved).green().bold(),
-            "║".bright_black(),
-            width = width - 22
-        ));
+        builder.push_record([format!("Estimated savings: {}", format!("~{} lines", lines_saved).green().bold())]);
     }
+
+    let dashboard = builder
+        .build()
+        .with(Style::empty()
+            .top('═')
+            .bottom('═')
+            .left('║')
+            .right('║')
+            .horizontal('═')
+            .vertical('║')
+            .corner_top_left('╔')
+            .corner_top_right('╗')
+            .corner_bottom_left('╚')
+            .corner_bottom_right('╝')
+            .intersection_top('╠')
+            .intersection_bottom('╣')
+            .intersection('╬')
+            .remove_horizontal())
+        .to_string();
+    
+    output.push_str(&dashboard);
+    output.push('\n');
 
     // Clone type breakdown (if duplicates found)
     if !report.duplicates.is_empty() {
@@ -153,73 +124,53 @@ pub fn format_text_report(
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0);
 
-        output.push_str(&format!(
-            "{}\n",
-            format!("╠{}╣", "═".repeat(width)).bright_black()
-        ));
-        output.push_str(&format!(
-            "{} {:<width$} {}\n",
-            "║".bright_black(),
-            "Clone Type Breakdown:".bright_white(),
-            "║".bright_black(),
-            width = width
-        ));
+        // Clone type breakdown section
+        let mut clone_builder = Builder::default();
+        clone_builder.push_record(["Clone Type Breakdown:".bright_white().to_string()]);
 
         if type1_count > 0 {
-            output.push_str(&format!(
-                "{} {} {:>3} {} {} {}\n",
-                "║".bright_black(),
-                "  Type-1 (exact):".red(),
-                type1_count.to_string().red().bold(),
-                "groups │".dimmed(),
-                "Critical priority".red(),
-                "║".bright_black()
-            ));
+            clone_builder.push_record([format!("  Type-1 (exact): {} groups │ Critical priority", type1_count).red().to_string()]);
         }
         if type2_count > 0 {
-            output.push_str(&format!(
-                "{} {} {:>3} {} {} {}\n",
-                "║".bright_black(),
-                "  Type-2 (renamed):".yellow(),
-                type2_count.to_string().yellow().bold(),
-                "groups │".dimmed(),
-                "High priority    ".yellow(),
-                "║".bright_black()
-            ));
+            clone_builder.push_record([format!("  Type-2 (renamed): {} groups │ High priority", type2_count).yellow().to_string()]);
         }
         if type3_count > 0 {
-            output.push_str(&format!(
-                "{} {} {:>3} {} {} {}\n",
-                "║".bright_black(),
-                "  Type-3 (modified):".bright_yellow(),
-                type3_count.to_string().bright_yellow().bold(),
-                "groups │".dimmed(),
-                "Medium priority  ".bright_yellow(),
-                "║".bright_black()
-            ));
+            clone_builder.push_record([format!("  Type-3 (modified): {} groups │ Medium priority", type3_count).bright_yellow().to_string()]);
         }
 
-        output.push_str(&format!(
-            "{} {:<width$} {}\n",
-            "║".bright_black(),
-            format!(
-                "  Similarity range: {:.1}% - {:.1}%",
-                min_similarity * 100.0,
-                max_similarity * 100.0
-            )
-            .dimmed(),
-            "║".bright_black(),
-            width = width
-        ));
+        clone_builder.push_record([format!(
+            "  Similarity range: {:.1}% - {:.1}%",
+            min_similarity * 100.0,
+            max_similarity * 100.0
+        )
+        .dimmed()
+        .to_string()]);
+
+        let clone_table = clone_builder
+            .build()
+            .with(Style::empty()
+                .top('═')
+                .bottom('═')
+                .left('║')
+                .right('║')
+                .horizontal('═')
+                .vertical('║')
+                .corner_top_left('╔')
+                .corner_top_right('╗')
+                .corner_bottom_left('╚')
+                .corner_bottom_right('╝')
+                .intersection_top('╠')
+                .intersection_bottom('╣')
+                .intersection('╬')
+                .remove_horizontal())
+            .to_string();
+
+        output.push_str(&clone_table);
+        output.push('\n');
 
         // Top offenders section
-        append_top_offenders(&mut output, report, width);
+        append_top_offenders(&mut output, report);
     }
-
-    output.push_str(&format!(
-        "{}\n",
-        format!("╚{}╝", "═".repeat(width)).bright_black()
-    ));
 
     if verbose {
         append_performance_stats(&mut output, report);
@@ -323,7 +274,7 @@ pub fn format_text_report(
 }
 
 /// Append top offenders section to the report
-fn append_top_offenders(output: &mut String, report: &dupe_core::Report, width: usize) {
+fn append_top_offenders(output: &mut String, report: &dupe_core::Report) {
     use std::collections::HashMap;
     let mut file_counts: HashMap<String, usize> = HashMap::new();
 
@@ -339,17 +290,8 @@ fn append_top_offenders(output: &mut String, report: &dupe_core::Report, width: 
     top_offenders.truncate(5);
 
     if !top_offenders.is_empty() {
-        output.push_str(&format!(
-            "{}\n",
-            format!("╠{}╣", "═".repeat(width)).bright_black()
-        ));
-        output.push_str(&format!(
-            "{} {:<width$} {}\n",
-            "║".bright_black(),
-            "Top Offenders:".bright_white(),
-            "║".bright_black(),
-            width = width
-        ));
+        let mut offenders_builder = Builder::default();
+        offenders_builder.push_record(["Top Offenders:".bright_white().to_string()]);
 
         for (idx, (file, count)) in top_offenders.iter().enumerate() {
             // Truncate filename if too long
@@ -359,16 +301,30 @@ fn append_top_offenders(output: &mut String, report: &dupe_core::Report, width: 
                 file.clone()
             };
 
-            output.push_str(&format!(
-                "{} {} {:<43} {:>3} {} {}\n",
-                "║".bright_black(),
-                format!("  {}.", idx + 1).dimmed(),
-                display_name,
-                count,
-                "duplicates".dimmed(),
-                "║".bright_black()
-            ));
+            offenders_builder.push_record([format!("  {}. {} {} duplicates", idx + 1, display_name, count)]);
         }
+
+        let offenders_table = offenders_builder
+            .build()
+            .with(Style::empty()
+                .top('═')
+                .bottom('═')
+                .left('║')
+                .right('║')
+                .horizontal('═')
+                .vertical('║')
+                .corner_top_left('╔')
+                .corner_top_right('╗')
+                .corner_bottom_left('╚')
+                .corner_bottom_right('╝')
+                .intersection_top('╠')
+                .intersection_bottom('╣')
+                .intersection('╬')
+                .remove_horizontal())
+            .to_string();
+
+        output.push_str(&offenders_table);
+        output.push('\n');
     }
 }
 
@@ -717,10 +673,15 @@ fn append_code_preview(
 
     output.push('\n');
     output.push_str(&format!("   {}\n", "Code Preview:".bright_cyan()));
-    output.push_str(&format!(
-        "   {}\n",
-        "┌─────────────────────────────────────────────".bright_black()
-    ));
+
+    // Build code preview table using tabled
+    let mut code_builder = Builder::default();
+    
+    // Add header row
+    code_builder.push_record([
+        "Line".dimmed().to_string(),
+        "Code".to_string(),
+    ]);
 
     for (i, line) in lines.iter().take(display_lines).enumerate() {
         let line_num = start_line + i;
@@ -730,28 +691,43 @@ fn append_code_preview(
         } else {
             line.to_string()
         };
-        output.push_str(&format!(
-            "   {} {:>4} {} {}\n",
-            "│".bright_black(),
-            line_num.to_string().dimmed(),
-            "│".bright_black(),
-            display_line
-        ));
+        code_builder.push_record([
+            line_num.to_string().dimmed().to_string(),
+            display_line,
+        ]);
     }
 
     if truncated {
-        output.push_str(&format!(
-            "   {} {} {}\n",
-            "│".bright_black(),
-            "...".dimmed(),
-            format!("({} more lines)", lines.len() - max_lines).dimmed()
-        ));
+        code_builder.push_record([
+            "...".dimmed().to_string(),
+            format!("({} more lines)", lines.len() - max_lines).dimmed().to_string(),
+        ]);
     }
 
-    output.push_str(&format!(
-        "   {}\n",
-        "└─────────────────────────────────────────────".bright_black()
-    ));
+    let code_table = code_builder
+        .build()
+        .with(Style::empty()
+            .top('─')
+            .bottom('─')
+            .left(' ')
+            .right(' ')
+            .horizontal('─')
+            .vertical('│')
+            .corner_top_left('┌')
+            .corner_top_right('┐')
+            .corner_bottom_left('└')
+            .corner_bottom_right('┘')
+            .intersection_left('├')
+            .intersection_right('┤')
+            .intersection_top('┬')
+            .intersection_bottom('┴')
+            .intersection('┼'))
+        .to_string();
+
+    // Add indentation to match original format
+    for line in code_table.lines() {
+        output.push_str(&format!("   {}\n", line));
+    }
 }
 
 /// Generate refactoring suggestion based on duplicate characteristics
