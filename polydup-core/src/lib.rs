@@ -1421,6 +1421,10 @@ impl Scanner {
     }
 
     /// Finds clone matches between two functions using extension algorithm
+    ///
+    /// Uses an incremental Rabin-Karp rolling hash so each window's hash is
+    /// computed in O(1) per step rather than O(window_size). For
+    /// min_block_size=50 this is the dominant speedup on the default scan path.
     fn find_clones_between_functions(
         &self,
         func1: &FunctionHash,
@@ -1429,24 +1433,28 @@ impl Scanner {
         use std::collections::HashMap;
 
         let mut matches = Vec::new();
-        let mut hash_map: HashMap<u64, Vec<usize>> = HashMap::new();
 
-        // Index all windows in func1
-        let mut i = 0;
-        while i <= func1.tokens.len().saturating_sub(self.min_block_size) {
-            let hash = hashing::compute_window_hash(&func1.tokens[i..i + self.min_block_size]);
-            hash_map.entry(hash).or_default().push(i);
-            i += 1;
+        // Compute rolling hashes for both functions in O(m + n) total work.
+        // Both sides use the same hash function so the hashmap lookup is consistent.
+        let hashes1 = compute_rolling_hashes(&func1.tokens, self.min_block_size);
+        let hashes2 = compute_rolling_hashes(&func2.tokens, self.min_block_size);
+
+        // Index all windows in func1 by hash → positions
+        let mut hash_map: HashMap<u64, Vec<usize>> = HashMap::with_capacity(hashes1.len());
+        for &(hash, offset) in &hashes1 {
+            hash_map.entry(hash).or_default().push(offset);
         }
 
-        // Search for matches in func2
-        let mut j = 0;
-        while j <= func2.tokens.len().saturating_sub(self.min_block_size) {
-            let hash = hashing::compute_window_hash(&func2.tokens[j..j + self.min_block_size]);
+        // Search for matches in func2.
+        // hashes2[idx].1 == idx, so we can use index directly as token offset.
+        let mut idx = 0;
+        while idx < hashes2.len() {
+            let (hash, j) = hashes2[idx];
 
+            let mut skip = 0;
             if let Some(func1_positions) = hash_map.get(&hash) {
                 for &func1_pos in func1_positions {
-                    // Verify exact match using shared utility
+                    // Verify exact match (handle hash collisions)
                     if hashing::verify_cross_window_match(
                         &func1.tokens,
                         &func2.tokens,
@@ -1454,7 +1462,6 @@ impl Scanner {
                         j,
                         self.min_block_size,
                     ) {
-                        // Greedy extension using shared utility
                         let extension = hashing::extend_match(
                             &func1.tokens,
                             &func2.tokens,
@@ -1473,14 +1480,15 @@ impl Scanner {
                             similarity: 1.0, // Exact match
                         });
 
-                        // Skip ahead
-                        j += extension.max(1);
+                        skip = extension.max(1);
                         break;
                     }
                 }
             }
 
-            j += 1;
+            // Preserves original semantics: advance by extension.max(1) after a
+            // match, plus the always-on +1 step.
+            idx += skip + 1;
         }
 
         matches

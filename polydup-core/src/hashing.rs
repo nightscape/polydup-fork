@@ -7,6 +7,7 @@
 //! - Edit distance calculation (Type-3 clone detection)
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::num::Wrapping;
 
 /// Normalized token representation
@@ -215,7 +216,7 @@ pub struct RollingHash {
     /// Power of base for window size (base^window_size)
     base_power: Wrapping<u64>,
     /// Current window contents
-    window: Vec<u64>,
+    window: VecDeque<u64>,
 }
 
 impl RollingHash {
@@ -237,7 +238,7 @@ impl RollingHash {
             base,
             hash: Wrapping(0),
             base_power,
-            window: Vec::with_capacity(window_size),
+            window: VecDeque::with_capacity(window_size),
         }
     }
 
@@ -253,7 +254,7 @@ impl RollingHash {
     pub fn roll(&mut self, token_hash: u64) -> Option<u64> {
         if self.window.len() < self.window_size {
             // Window not full yet
-            self.window.push(token_hash);
+            self.window.push_back(token_hash);
             self.hash = self.hash * self.base + Wrapping(token_hash);
 
             if self.window.len() == self.window_size {
@@ -262,14 +263,16 @@ impl RollingHash {
                 None
             }
         } else {
-            // Window is full, remove oldest and add new
-            let old_token = self.window.remove(0);
-            self.window.push(token_hash);
+            // Window is full, remove oldest and add new (O(1) with VecDeque)
+            let old_token = self.window.pop_front().expect("window is full");
+            self.window.push_back(token_hash);
 
-            // Remove contribution of old token
-            self.hash -= Wrapping(old_token) * self.base_power;
-            // Shift and add new token
+            // Shift and add new token first: this gives every existing token in
+            // the window an extra factor of `base`, including the oldest one
+            // (whose coefficient becomes b^window_size = base_power).
             self.hash = self.hash * self.base + Wrapping(token_hash);
+            // Now subtract the oldest token's contribution exactly.
+            self.hash -= Wrapping(old_token) * self.base_power;
 
             Some(self.hash.0)
         }
@@ -980,6 +983,33 @@ mod tests {
         let hasher = RollingHash::new(50);
         assert_eq!(hasher.window_size(), 50);
         assert_eq!(hasher.current_hash(), None);
+    }
+
+    #[test]
+    fn test_rolling_hash_consistent_across_prefixes() {
+        // The same window contents must produce the same hash regardless of
+        // what tokens preceded the window. Without this property, cross-stream
+        // hash lookups (e.g. find_clones_between_functions, scan_with_cache)
+        // silently miss matches.
+        let window_size = 5;
+        let target_window: Vec<u64> = vec![10, 20, 30, 40, 50];
+
+        let mut from_scratch = RollingHash::new(window_size);
+        let mut hash_a = None;
+        for t in &target_window {
+            hash_a = from_scratch.roll(*t);
+        }
+
+        let mut with_prefix = RollingHash::new(window_size);
+        for prefix in [99u64, 88, 77] {
+            with_prefix.roll(prefix);
+        }
+        let mut hash_b = None;
+        for t in &target_window {
+            hash_b = with_prefix.roll(*t);
+        }
+
+        assert_eq!(hash_a, hash_b, "rolling hash must be position-independent");
     }
 
     #[test]
