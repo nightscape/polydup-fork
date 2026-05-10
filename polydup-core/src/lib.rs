@@ -1446,10 +1446,16 @@ impl Scanner {
         }
 
         // Search for matches in func2.
-        // hashes2[idx].1 == idx, so we can use index directly as token offset.
+        // The skip logic below assumes `compute_rolling_hashes` returns a dense,
+        // in-order sequence where each entry's start index matches its position.
         let mut idx = 0;
         while idx < hashes2.len() {
             let (hash, j) = hashes2[idx];
+            debug_assert_eq!(
+                j, idx,
+                "compute_rolling_hashes must return dense, in-order start indices \
+                 for skip-based advancement to remain correct"
+            );
 
             let mut skip = 0;
             if let Some(func1_positions) = hash_map.get(&hash) {
